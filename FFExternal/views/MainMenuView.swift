@@ -47,12 +47,12 @@ class FFAppState: ObservableObject {
     }
 
     func syncInjectedState() {
-        ffInjected    = LicenseService.storedKey() != nil && ContainerStore
-            .resolveAppContainerPath(bundleID: FFGame.freeFire.rawValue)
-            .map { FFCheatService.hasBackup(bundleID: FFGame.freeFire.rawValue) } ?? false
-        ffMaxInjected = LicenseService.storedKey() != nil && ContainerStore
-            .resolveAppContainerPath(bundleID: FFGame.freefireMax.rawValue)
-            .map { FFCheatService.hasBackup(bundleID: FFGame.freefireMax.rawValue) } ?? false
+        ffInjected    = LicenseService.storedKey() != nil &&
+            (ContainerStore.resolveAppContainerPath(bundleID: FFGame.freeFire.rawValue) != nil) &&
+            FFCheatService.hasBackup(bundleID: FFGame.freeFire.rawValue)
+        ffMaxInjected = LicenseService.storedKey() != nil &&
+            (ContainerStore.resolveAppContainerPath(bundleID: FFGame.freefireMax.rawValue) != nil) &&
+            FFCheatService.hasBackup(bundleID: FFGame.freefireMax.rawValue)
     }
 }
 
