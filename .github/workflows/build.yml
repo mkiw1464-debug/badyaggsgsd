@@ -1,219 +1,149 @@
-name: Build IPA
+name: Diagnose Xcode Project
 
 on:
   workflow_dispatch:
-  push:
-    branches:
-      - main
 
 jobs:
-  build:
+  diagnose:
     runs-on: macos-14
 
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Xcode information
+      - name: Inspect exact project
         run: |
           set -eux
 
-          echo "Developer:"
+          PROJECT="FFExternal.xcodeproj/project.pbxproj"
+
+          echo "===== XCODE ====="
+          xcodebuild -version
           xcode-select -p
 
-          echo "Xcode:"
-          xcodebuild -version
-
-          echo "Commit:"
+          echo "===== GIT ====="
           git rev-parse HEAD
 
-      - name: Repair Xcode project IDs
+          echo "===== PROJECT FILE ====="
+          ls -lah "$PROJECT"
+          file "$PROJECT"
+
+          echo "===== FIRST 30 LINES ====="
+          nl -ba "$PROJECT" | head -n 30
+
+          echo "===== LAST 30 LINES ====="
+          nl -ba "$PROJECT" | tail -n 30
+
+      - name: Check hidden characters
         run: |
           set -eux
 
           PROJECT="FFExternal.xcodeproj/project.pbxproj"
 
-          test -f "$PROJECT"
+          echo "===== HEX FIRST 200 BYTES ====="
+          xxd -l 200 "$PROJECT"
 
-          cp "$PROJECT" "$PROJECT.original"
-
-          python3 <<'PY'
-          from pathlib import Path
-          import hashlib
-          import re
-
-          path = Path("FFExternal.xcodeproj/project.pbxproj")
-          text = path.read_text(encoding="utf-8")
-
-          # Find all custom FFEX object IDs.
-          ids = sorted(
-              set(
-                  re.findall(
-                      r'\bFFEX[0-9A-Za-z]+\b',
-                      text
-                  )
-              )
-          )
-
-          print("Found object IDs:", len(ids))
-
-          mapping = {}
-
-          for old in ids:
-              # Deterministic 24-character hexadecimal ID.
-              new = hashlib.sha256(
-                  old.encode("utf-8")
-              ).hexdigest()[:24].upper()
-
-              mapping[old] = new
-
-          # Check for collisions.
-          reverse = {}
-
-          for old, new in mapping.items():
-              if new in reverse and reverse[new] != old:
-                  raise SystemExit(
-                      f"ID collision: {old} and {reverse[new]} -> {new}"
-                  )
-              reverse[new] = old
-
-          # Replace IDs everywhere they occur.
-          for old, new in mapping.items():
-              text = re.sub(
-                  rf'\b{re.escape(old)}\b',
-                  new,
-                  text
-              )
-
-          path.write_text(text, encoding="utf-8")
-
-          print()
-          print("===== ID CONVERSION =====")
-
-          for old, new in mapping.items():
-              print(f"{old} -> {new}")
-
-          print()
-          print("Project repaired in CI.")
-          PY
-
-      - name: Verify repaired project
-        run: |
-          set -eux
-
-          PROJECT="FFExternal.xcodeproj/project.pbxproj"
-
-          echo "===== FIRST LINES ====="
-          head -n 10 "$PROJECT"
-
-          echo "===== REMAINING FFEX IDs ====="
-          grep -oE '\bFFEX[0-9A-Za-z]+\b' "$PROJECT" | sort -u || true
-
-          echo "===== BASIC STRUCTURE ====="
+          echo "===== NON-ASCII / CONTROL CHARACTERS ====="
 
           python3 <<'PY'
           from pathlib import Path
 
           p = Path("FFExternal.xcodeproj/project.pbxproj")
           data = p.read_bytes()
-          text = data.decode("utf-8")
 
-          print("UTF-8: OK")
-          print("Bytes:", len(data))
-          print("Opening braces:", text.count("{"))
-          print("Closing braces:", text.count("}"))
-          print("Opening parentheses:", text.count("("))
-          print("Closing parentheses:", text.count(")"))
+          for i, b in enumerate(data):
+              if b < 32 and b not in (9, 10, 13):
+                  print(
+                      f"CONTROL BYTE: offset={i}, value=0x{b:02x}"
+                  )
 
-          if text.count("{") != text.count("}"):
-              raise SystemExit("Unbalanced braces")
-
-          if text.count("(") != text.count(")"):
-              raise SystemExit("Unbalanced parentheses")
-
-          if not text.rstrip().endswith("}"):
-              raise SystemExit("Project does not end correctly")
-
-          print("Structure: OK")
+          print("Finished byte scan.")
           PY
 
-      - name: Xcode project test
+      - name: Check Xcode project IDs
         run: |
           set -eux
+
+          python3 <<'PY'
+          from pathlib import Path
+          import re
+
+          p = Path("FFExternal.xcodeproj/project.pbxproj")
+          text = p.read_text(encoding="utf-8")
+
+          ids = re.findall(
+              r'(?<![A-Za-z0-9_])([A-Za-z0-9_]+)(?=\s*/\*|\s*=)',
+              text
+          )
+
+          print("Potential object IDs:")
+
+          for x in ids:
+              if len(x) >= 20:
+                  print(x)
+
+          print()
+          print("FFEX occurrences:", len(re.findall(r'\bFFEX', text)))
+          print("UTF8 headers:", text.count("// !$*UTF8*$!"))
+          PY
+
+      - name: Test original project
+        run: |
+          set +e
 
           xcodebuild \
             -project FFExternal.xcodeproj \
-            -list
+            -list \
+            > /tmp/xcodebuild.out \
+            2>&1
 
-      - name: Clean
+          STATUS=$?
+
+          echo "===== XCODEBUILD OUTPUT ====="
+          cat /tmp/xcodebuild.out
+
+          echo
+          echo "===== EXIT CODE ====="
+          echo "$STATUS"
+
+          exit 0
+
+      - name: Search for conflict markers
         run: |
           set -eux
 
-          xcodebuild \
-            -project FFExternal.xcodeproj \
-            -scheme FFExternal \
-            -configuration Release \
-            clean \
-            CODE_SIGNING_ALLOWED=NO \
-            CODE_SIGNING_REQUIRED=NO \
-            CODE_SIGN_IDENTITY=""
+          PROJECT="FFExternal.xcodeproj/project.pbxproj"
 
-      - name: Archive
+          echo "===== GIT CONFLICT MARKERS ====="
+
+          grep -nE \
+            '^(<<<<<<<|=======|>>>>>>>)' \
+            "$PROJECT" || true
+
+      - name: Create parser variants
         run: |
           set -eux
 
-          rm -rf build
-          mkdir -p build
+          PROJECT="FFExternal.xcodeproj/project.pbxproj"
 
-          xcodebuild \
-            -project FFExternal.xcodeproj \
-            -scheme FFExternal \
-            -configuration Release \
-            -sdk iphoneos \
-            -archivePath "$PWD/build/FFExternal.xcarchive" \
-            archive \
-            CODE_SIGNING_ALLOWED=NO \
-            CODE_SIGNING_REQUIRED=NO \
-            CODE_SIGN_IDENTITY=""
+          cp "$PROJECT" /tmp/original.pbxproj
 
-      - name: Verify application
-        run: |
-          set -eux
+          # Variant 1: remove UTF8 comment
+          tail -n +2 "$PROJECT" > /tmp/no-header.pbxproj
 
-          APP="build/FFExternal.xcarchive/Products/Applications/FFExternal.app"
+          # Variant 2: remove comments
+          sed -E \
+            's@//.*$@@' \
+            "$PROJECT" \
+            > /tmp/no-comments.pbxproj
 
-          if [ ! -d "$APP" ]; then
-            echo "FFExternal.app was not produced."
-            find build -maxdepth 6 -print
-            exit 1
-          fi
+          echo "Created diagnostic variants."
 
-          echo "Application found:"
-          ls -lah "$APP"
+          echo "===== ORIGINAL ====="
+          head -n 3 /tmp/original.pbxproj
 
-      - name: Create IPA
-        run: |
-          set -eux
+          echo "===== NO HEADER ====="
+          head -n 3 /tmp/no-header.pbxproj
 
-          APP="build/FFExternal.xcarchive/Products/Applications/FFExternal.app"
-
-          rm -rf build/Payload
-          mkdir -p build/Payload
-
-          cp -R "$APP" build/Payload/FFExternal.app
-
-          cd build
-
-          zip -qry FFExternal.ipa Payload
-
-          test -f FFExternal.ipa
-
-          echo "===== IPA CREATED ====="
-          ls -lh FFExternal.ipa
-
-      - name: Upload IPA
-        uses: actions/upload-artifact@v4
-        with:
-          name: FFExternal-IPA
-          path: build/FFExternal.ipa
-          if-no-files-found: error
+          echo "===== NO COMMENTS ====="
+          head -n 10 /tmp/no-comments.pbxproj
