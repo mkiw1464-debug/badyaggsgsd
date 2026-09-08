@@ -1,149 +1,124 @@
-name: Diagnose Xcode Project
+name: Build IPA
 
 on:
   workflow_dispatch:
 
 jobs:
-  diagnose:
+  build:
     runs-on: macos-14
 
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Inspect exact project
+      - name: Install XcodeGen
+        run: |
+          brew install xcodegen
+
+      - name: Generate clean Xcode project
         run: |
           set -eux
 
-          PROJECT="FFExternal.xcodeproj/project.pbxproj"
+          rm -rf GeneratedApp
+          mkdir -p GeneratedApp
 
-          echo "===== XCODE ====="
-          xcodebuild -version
-          xcode-select -p
+          cat > GeneratedApp/project.yml <<'YAML'
+name: FFExternal
 
-          echo "===== GIT ====="
-          git rev-parse HEAD
+options:
+  bundleIdPrefix: com.example
 
-          echo "===== PROJECT FILE ====="
-          ls -lah "$PROJECT"
-          file "$PROJECT"
+targets:
+  FFExternal:
+    type: application
+    platform: iOS
+    deploymentTarget: "15.0"
 
-          echo "===== FIRST 30 LINES ====="
-          nl -ba "$PROJECT" | head -n 30
+    sources:
+      - path: ../FFExternal
+        excludes:
+          - "**/*.plist"
 
-          echo "===== LAST 30 LINES ====="
-          nl -ba "$PROJECT" | tail -n 30
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.example.ffexternal
+        PRODUCT_NAME: FFExternal
+        SWIFT_VERSION: 5.0
+        TARGETED_DEVICE_FAMILY: "1,2"
+        INFOPLIST_KEY_CFBundleDisplayName: FFExternal
+        CODE_SIGNING_ALLOWED: NO
+        CODE_SIGNING_REQUIRED: NO
+        CODE_SIGN_IDENTITY: ""
 
-      - name: Check hidden characters
+      configs:
+        Debug:
+          SWIFT_OPTIMIZATION_LEVEL: "-Onone"
+
+        Release:
+          SWIFT_OPTIMIZATION_LEVEL: "-O"
+YAML
+
+          cd GeneratedApp
+          xcodegen generate
+
+          echo "===== GENERATED PROJECT ====="
+          ls -la
+
+          cd ..
+
+      - name: Show generated project
         run: |
           set -eux
-
-          PROJECT="FFExternal.xcodeproj/project.pbxproj"
-
-          echo "===== HEX FIRST 200 BYTES ====="
-          xxd -l 200 "$PROJECT"
-
-          echo "===== NON-ASCII / CONTROL CHARACTERS ====="
-
-          python3 <<'PY'
-          from pathlib import Path
-
-          p = Path("FFExternal.xcodeproj/project.pbxproj")
-          data = p.read_bytes()
-
-          for i, b in enumerate(data):
-              if b < 32 and b not in (9, 10, 13):
-                  print(
-                      f"CONTROL BYTE: offset={i}, value=0x{b:02x}"
-                  )
-
-          print("Finished byte scan.")
-          PY
-
-      - name: Check Xcode project IDs
-        run: |
-          set -eux
-
-          python3 <<'PY'
-          from pathlib import Path
-          import re
-
-          p = Path("FFExternal.xcodeproj/project.pbxproj")
-          text = p.read_text(encoding="utf-8")
-
-          ids = re.findall(
-              r'(?<![A-Za-z0-9_])([A-Za-z0-9_]+)(?=\s*/\*|\s*=)',
-              text
-          )
-
-          print("Potential object IDs:")
-
-          for x in ids:
-              if len(x) >= 20:
-                  print(x)
-
-          print()
-          print("FFEX occurrences:", len(re.findall(r'\bFFEX', text)))
-          print("UTF8 headers:", text.count("// !$*UTF8*$!"))
-          PY
-
-      - name: Test original project
-        run: |
-          set +e
 
           xcodebuild \
-            -project FFExternal.xcodeproj \
-            -list \
-            > /tmp/xcodebuild.out \
-            2>&1
+            -project GeneratedApp/FFExternal.xcodeproj \
+            -list
 
-          STATUS=$?
-
-          echo "===== XCODEBUILD OUTPUT ====="
-          cat /tmp/xcodebuild.out
-
-          echo
-          echo "===== EXIT CODE ====="
-          echo "$STATUS"
-
-          exit 0
-
-      - name: Search for conflict markers
+      - name: Build archive
         run: |
           set -eux
 
-          PROJECT="FFExternal.xcodeproj/project.pbxproj"
+          rm -rf build
+          mkdir -p build
 
-          echo "===== GIT CONFLICT MARKERS ====="
+          xcodebuild \
+            -project GeneratedApp/FFExternal.xcodeproj \
+            -scheme FFExternal \
+            -configuration Release \
+            -sdk iphoneos \
+            -archivePath "$PWD/build/FFExternal.xcarchive" \
+            archive \
+            CODE_SIGNING_ALLOWED=NO \
+            CODE_SIGNING_REQUIRED=NO \
+            CODE_SIGN_IDENTITY=""
 
-          grep -nE \
-            '^(<<<<<<<|=======|>>>>>>>)' \
-            "$PROJECT" || true
-
-      - name: Create parser variants
+      - name: Create IPA
         run: |
           set -eux
 
-          PROJECT="FFExternal.xcodeproj/project.pbxproj"
+          APP="build/FFExternal.xcarchive/Products/Applications/FFExternal.app"
 
-          cp "$PROJECT" /tmp/original.pbxproj
+          if [ ! -d "$APP" ]; then
+            echo "ERROR: App was not produced."
+            find build -maxdepth 6 -print
+            exit 1
+          fi
 
-          # Variant 1: remove UTF8 comment
-          tail -n +2 "$PROJECT" > /tmp/no-header.pbxproj
+          rm -rf build/Payload
+          mkdir -p build/Payload
 
-          # Variant 2: remove comments
-          sed -E \
-            's@//.*$@@' \
-            "$PROJECT" \
-            > /tmp/no-comments.pbxproj
+          cp -R "$APP" build/Payload/FFExternal.app
 
-          echo "Created diagnostic variants."
+          cd build
 
-          echo "===== ORIGINAL ====="
-          head -n 3 /tmp/original.pbxproj
+          zip -qry FFExternal.ipa Payload
 
-          echo "===== NO HEADER ====="
-          head -n 3 /tmp/no-header.pbxproj
+          echo "===== IPA CREATED ====="
+          ls -lh FFExternal.ipa
 
-          echo "===== NO COMMENTS ====="
-          head -n 10 /tmp/no-comments.pbxproj
+      - name: Upload IPA
+        uses: actions/upload-artifact@v4
+        with:
+          name: FFExternal-IPA
+          path: build/FFExternal.ipa
+          if-no-files-found: error
