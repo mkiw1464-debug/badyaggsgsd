@@ -14,20 +14,20 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Select available Xcode
+      - name: Xcode info
         run: |
           set -eux
 
-          echo "Available Xcode installations:"
-          ls -d /Applications/Xcode*.app || true
-
-          echo "Current developer directory:"
+          echo "Developer:"
           xcode-select -p
 
-          echo "Xcode version:"
+          echo "Xcode:"
           xcodebuild -version
 
-      - name: Prepare project
+          echo "Commit:"
+          git rev-parse HEAD
+
+      - name: Inspect project
         run: |
           set -eux
 
@@ -35,26 +35,97 @@ jobs:
 
           test -f "$PROJECT"
 
-          echo "Before:"
-          head -n 5 "$PROJECT"
+          echo "===== FIRST 10 LINES ====="
+          nl -ba "$PROJECT" | head -n 10
 
-          # Remove the OpenStep UTF-8 comment only in CI.
-          # The original repository file is not modified remotely.
-          sed -i.bak '1{/^\/\/ !\$\*UTF8\*\$!$/d;}' "$PROJECT"
+          echo "===== LAST 10 LINES ====="
+          nl -ba "$PROJECT" | tail -n 10
 
-          echo "After:"
-          head -n 5 "$PROJECT"
+          echo "===== UTF8 HEADER ====="
+          grep -nF '// !$*UTF8*$!' "$PROJECT" || true
 
-          echo "Header count:"
-          grep -cF '// !$*UTF8*$!' "$PROJECT" || true
+          echo "===== FILE TYPE ====="
+          file "$PROJECT"
 
-      - name: Validate Xcode project
+          echo "===== FILE SIZE ====="
+          wc -c "$PROJECT"
+
+      - name: Validate project structure
         run: |
           set -eux
 
+          PROJECT="FFExternal.xcodeproj/project.pbxproj"
+
+          python3 <<'PY'
+          from pathlib import Path
+
+          p = Path("FFExternal.xcodeproj/project.pbxproj")
+          data = p.read_bytes()
+
+          print("bytes:", len(data))
+          print("starts with UTF8 header:", data.startswith(b"// !$*UTF8*$!"))
+          print("contains NUL:", b"\x00" in data)
+          print("contains CR:", b"\r" in data)
+
+          text = data.decode("utf-8")
+
+          print("UTF-8: OK")
+          print("opening braces:", text.count("{"))
+          print("closing braces:", text.count("}"))
+          print("opening parens:", text.count("("))
+          print("closing parens:", text.count(")"))
+
+          if text.count("{") != text.count("}"):
+              raise SystemExit("ERROR: unmatched { }")
+
+          if text.count("(") != text.count(")"):
+              raise SystemExit("ERROR: unmatched ( )")
+
+          if not text.rstrip().endswith("}"):
+              raise SystemExit("ERROR: project does not end with }")
+
+          print("Basic structure: OK")
+          PY
+
+      - name: Test plist parser
+        run: |
+          set -eux
+
+          PROJECT="FFExternal.xcodeproj/project.pbxproj"
+
+          # plutil on macOS does not like the Xcode OpenStep UTF8 comment
+          # as the first line, so validate a temporary copy without it.
+          tail -n +2 "$PROJECT" > /tmp/project-no-header.pbxproj
+
+          echo "===== plutil result ====="
+
+          if plutil -lint /tmp/project-no-header.pbxproj; then
+            echo "plutil: OK"
+          else
+            echo "plutil rejected the OpenStep project syntax."
+            echo "This is diagnostic only; it is NOT used as the Xcode build input."
+          fi
+
+      - name: Xcode project parser test
+        run: |
+          set -o pipefail
+
           xcodebuild \
             -project FFExternal.xcodeproj \
-            -list
+            -list \
+            2>&1 | tee /tmp/xcode-project.log
+
+      - name: Show parser diagnostics
+        if: failure()
+        run: |
+          echo "===== XCODE PROJECT LOG ====="
+          cat /tmp/xcode-project.log || true
+
+          echo "===== PROJECT AROUND BEGINNING ====="
+          nl -ba FFExternal.xcodeproj/project.pbxproj | sed -n '1,40p'
+
+          echo "===== PROJECT AROUND END ====="
+          nl -ba FFExternal.xcodeproj/project.pbxproj | tail -n 40
 
       - name: Clean
         run: |
@@ -87,19 +158,15 @@ jobs:
             CODE_SIGNING_REQUIRED=NO \
             CODE_SIGN_IDENTITY=""
 
-      - name: Check app
+      - name: Verify app
         run: |
           set -eux
 
           APP="build/FFExternal.xcarchive/Products/Applications/FFExternal.app"
 
-          if [ ! -d "$APP" ]; then
-            echo "ERROR: FFExternal.app was not produced."
-            find build -maxdepth 5 -type d -print
-            exit 1
-          fi
+          test -d "$APP"
 
-          echo "App produced:"
+          echo "APP:"
           ls -lah "$APP"
 
       - name: Package IPA
@@ -114,11 +181,15 @@ jobs:
           cp -R "$APP" build/Payload/FFExternal.app
 
           cd build
-          /usr/bin/zip -qry FFExternal.ipa Payload
+
+          /usr/bin/zip \
+            -qry \
+            FFExternal.ipa \
+            Payload
 
           test -f FFExternal.ipa
 
-          echo "IPA created:"
+          echo "===== IPA ====="
           ls -lh FFExternal.ipa
 
       - name: Upload IPA
