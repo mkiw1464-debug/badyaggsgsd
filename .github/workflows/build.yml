@@ -14,15 +14,20 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Show environment
+      - name: Select available Xcode
         run: |
           set -eux
-          xcode-select -p
-          xcodebuild -version
-          git rev-parse HEAD
-          git status --short
 
-      - name: Check project file
+          echo "Available Xcode installations:"
+          ls -d /Applications/Xcode*.app || true
+
+          echo "Current developer directory:"
+          xcode-select -p
+
+          echo "Xcode version:"
+          xcodebuild -version
+
+      - name: Prepare project
         run: |
           set -eux
 
@@ -30,21 +35,23 @@ jobs:
 
           test -f "$PROJECT"
 
-          echo "===== project.pbxproj first lines ====="
-          sed -n '1,20p' "$PROJECT"
+          echo "Before:"
+          head -n 5 "$PROJECT"
 
-          echo "===== project.pbxproj last lines ====="
-          tail -n 20 "$PROJECT"
+          # Remove the OpenStep UTF-8 comment only in CI.
+          # The original repository file is not modified remotely.
+          sed -i.bak '1{/^\/\/ !\$\*UTF8\*\$!$/d;}' "$PROJECT"
 
-          echo "===== UTF8 header count ====="
+          echo "After:"
+          head -n 5 "$PROJECT"
+
+          echo "Header count:"
           grep -cF '// !$*UTF8*$!' "$PROJECT" || true
 
-          echo "===== plutil validation ====="
-          plutil -lint "$PROJECT"
-
-      - name: List Xcode project
+      - name: Validate Xcode project
         run: |
           set -eux
+
           xcodebuild \
             -project FFExternal.xcodeproj \
             -list
@@ -52,12 +59,15 @@ jobs:
       - name: Clean
         run: |
           set -eux
+
           xcodebuild \
             -project FFExternal.xcodeproj \
             -scheme FFExternal \
             -configuration Release \
             clean \
-            CODE_SIGNING_ALLOWED=NO
+            CODE_SIGNING_ALLOWED=NO \
+            CODE_SIGNING_REQUIRED=NO \
+            CODE_SIGN_IDENTITY=""
 
       - name: Archive
         run: |
@@ -77,25 +87,38 @@ jobs:
             CODE_SIGNING_REQUIRED=NO \
             CODE_SIGN_IDENTITY=""
 
-      - name: Create unsigned IPA
+      - name: Check app
         run: |
           set -eux
 
-          APP_PATH="build/FFExternal.xcarchive/Products/Applications/FFExternal.app"
+          APP="build/FFExternal.xcarchive/Products/Applications/FFExternal.app"
 
-          test -d "$APP_PATH"
+          if [ ! -d "$APP" ]; then
+            echo "ERROR: FFExternal.app was not produced."
+            find build -maxdepth 5 -type d -print
+            exit 1
+          fi
+
+          echo "App produced:"
+          ls -lah "$APP"
+
+      - name: Package IPA
+        run: |
+          set -eux
+
+          APP="build/FFExternal.xcarchive/Products/Applications/FFExternal.app"
 
           rm -rf build/Payload
           mkdir -p build/Payload
 
-          cp -R "$APP_PATH" build/Payload/FFExternal.app
+          cp -R "$APP" build/Payload/FFExternal.app
 
           cd build
-          zip -qry FFExternal.ipa Payload
+          /usr/bin/zip -qry FFExternal.ipa Payload
 
           test -f FFExternal.ipa
 
-          echo "===== IPA ====="
+          echo "IPA created:"
           ls -lh FFExternal.ipa
 
       - name: Upload IPA
@@ -103,11 +126,4 @@ jobs:
         with:
           name: FFExternal-IPA
           path: build/FFExternal.ipa
-          if-no-files-found: error
-
-      - name: Upload archive
-        uses: actions/upload-artifact@v4
-        with:
-          name: FFExternal-XCArchive
-          path: build/FFExternal.xcarchive
           if-no-files-found: error
