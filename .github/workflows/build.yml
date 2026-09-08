@@ -14,7 +14,7 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Xcode info
+      - name: Xcode information
         run: |
           set -eux
 
@@ -27,7 +27,7 @@ jobs:
           echo "Commit:"
           git rev-parse HEAD
 
-      - name: Inspect project
+      - name: Repair Xcode project IDs
         run: |
           set -eux
 
@@ -35,97 +35,115 @@ jobs:
 
           test -f "$PROJECT"
 
-          echo "===== FIRST 10 LINES ====="
-          nl -ba "$PROJECT" | head -n 10
+          cp "$PROJECT" "$PROJECT.original"
 
-          echo "===== LAST 10 LINES ====="
-          nl -ba "$PROJECT" | tail -n 10
+          python3 <<'PY'
+          from pathlib import Path
+          import hashlib
+          import re
 
-          echo "===== UTF8 HEADER ====="
-          grep -nF '// !$*UTF8*$!' "$PROJECT" || true
+          path = Path("FFExternal.xcodeproj/project.pbxproj")
+          text = path.read_text(encoding="utf-8")
 
-          echo "===== FILE TYPE ====="
-          file "$PROJECT"
+          # Find all custom FFEX object IDs.
+          ids = sorted(
+              set(
+                  re.findall(
+                      r'\bFFEX[0-9A-Za-z]+\b',
+                      text
+                  )
+              )
+          )
 
-          echo "===== FILE SIZE ====="
-          wc -c "$PROJECT"
+          print("Found object IDs:", len(ids))
 
-      - name: Validate project structure
+          mapping = {}
+
+          for old in ids:
+              # Deterministic 24-character hexadecimal ID.
+              new = hashlib.sha256(
+                  old.encode("utf-8")
+              ).hexdigest()[:24].upper()
+
+              mapping[old] = new
+
+          # Check for collisions.
+          reverse = {}
+
+          for old, new in mapping.items():
+              if new in reverse and reverse[new] != old:
+                  raise SystemExit(
+                      f"ID collision: {old} and {reverse[new]} -> {new}"
+                  )
+              reverse[new] = old
+
+          # Replace IDs everywhere they occur.
+          for old, new in mapping.items():
+              text = re.sub(
+                  rf'\b{re.escape(old)}\b',
+                  new,
+                  text
+              )
+
+          path.write_text(text, encoding="utf-8")
+
+          print()
+          print("===== ID CONVERSION =====")
+
+          for old, new in mapping.items():
+              print(f"{old} -> {new}")
+
+          print()
+          print("Project repaired in CI.")
+          PY
+
+      - name: Verify repaired project
         run: |
           set -eux
 
           PROJECT="FFExternal.xcodeproj/project.pbxproj"
+
+          echo "===== FIRST LINES ====="
+          head -n 10 "$PROJECT"
+
+          echo "===== REMAINING FFEX IDs ====="
+          grep -oE '\bFFEX[0-9A-Za-z]+\b' "$PROJECT" | sort -u || true
+
+          echo "===== BASIC STRUCTURE ====="
 
           python3 <<'PY'
           from pathlib import Path
 
           p = Path("FFExternal.xcodeproj/project.pbxproj")
           data = p.read_bytes()
-
-          print("bytes:", len(data))
-          print("starts with UTF8 header:", data.startswith(b"// !$*UTF8*$!"))
-          print("contains NUL:", b"\x00" in data)
-          print("contains CR:", b"\r" in data)
-
           text = data.decode("utf-8")
 
           print("UTF-8: OK")
-          print("opening braces:", text.count("{"))
-          print("closing braces:", text.count("}"))
-          print("opening parens:", text.count("("))
-          print("closing parens:", text.count(")"))
+          print("Bytes:", len(data))
+          print("Opening braces:", text.count("{"))
+          print("Closing braces:", text.count("}"))
+          print("Opening parentheses:", text.count("("))
+          print("Closing parentheses:", text.count(")"))
 
           if text.count("{") != text.count("}"):
-              raise SystemExit("ERROR: unmatched { }")
+              raise SystemExit("Unbalanced braces")
 
           if text.count("(") != text.count(")"):
-              raise SystemExit("ERROR: unmatched ( )")
+              raise SystemExit("Unbalanced parentheses")
 
           if not text.rstrip().endswith("}"):
-              raise SystemExit("ERROR: project does not end with }")
+              raise SystemExit("Project does not end correctly")
 
-          print("Basic structure: OK")
+          print("Structure: OK")
           PY
 
-      - name: Test plist parser
+      - name: Xcode project test
         run: |
           set -eux
 
-          PROJECT="FFExternal.xcodeproj/project.pbxproj"
-
-          # plutil on macOS does not like the Xcode OpenStep UTF8 comment
-          # as the first line, so validate a temporary copy without it.
-          tail -n +2 "$PROJECT" > /tmp/project-no-header.pbxproj
-
-          echo "===== plutil result ====="
-
-          if plutil -lint /tmp/project-no-header.pbxproj; then
-            echo "plutil: OK"
-          else
-            echo "plutil rejected the OpenStep project syntax."
-            echo "This is diagnostic only; it is NOT used as the Xcode build input."
-          fi
-
-      - name: Xcode project parser test
-        run: |
-          set -o pipefail
-
           xcodebuild \
             -project FFExternal.xcodeproj \
-            -list \
-            2>&1 | tee /tmp/xcode-project.log
-
-      - name: Show parser diagnostics
-        if: failure()
-        run: |
-          echo "===== XCODE PROJECT LOG ====="
-          cat /tmp/xcode-project.log || true
-
-          echo "===== PROJECT AROUND BEGINNING ====="
-          nl -ba FFExternal.xcodeproj/project.pbxproj | sed -n '1,40p'
-
-          echo "===== PROJECT AROUND END ====="
-          nl -ba FFExternal.xcodeproj/project.pbxproj | tail -n 40
+            -list
 
       - name: Clean
         run: |
@@ -158,18 +176,22 @@ jobs:
             CODE_SIGNING_REQUIRED=NO \
             CODE_SIGN_IDENTITY=""
 
-      - name: Verify app
+      - name: Verify application
         run: |
           set -eux
 
           APP="build/FFExternal.xcarchive/Products/Applications/FFExternal.app"
 
-          test -d "$APP"
+          if [ ! -d "$APP" ]; then
+            echo "FFExternal.app was not produced."
+            find build -maxdepth 6 -print
+            exit 1
+          fi
 
-          echo "APP:"
+          echo "Application found:"
           ls -lah "$APP"
 
-      - name: Package IPA
+      - name: Create IPA
         run: |
           set -eux
 
@@ -182,14 +204,11 @@ jobs:
 
           cd build
 
-          /usr/bin/zip \
-            -qry \
-            FFExternal.ipa \
-            Payload
+          zip -qry FFExternal.ipa Payload
 
           test -f FFExternal.ipa
 
-          echo "===== IPA ====="
+          echo "===== IPA CREATED ====="
           ls -lh FFExternal.ipa
 
       - name: Upload IPA
