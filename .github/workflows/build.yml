@@ -42,7 +42,7 @@ jobs:
             -scheme FFExternal \
             -configuration Release \
             -archivePath "$RUNNER_TEMP/FFExternal.xcarchive" \
-            -destination "generic/platform=iOS" \
+            -destination "platform=iOS,name=Any iOS Device" \
             CODE_SIGNING_ALLOWED=NO \
             CODE_SIGN_IDENTITY="" \
             CODE_SIGN_ENTITLEMENTS="" \
