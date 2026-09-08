@@ -19,62 +19,40 @@ jobs:
       - name: Select Xcode 16
         run: sudo xcode-select -s /Applications/Xcode_16.app/Contents/Developer
 
-      - name: Debug — list repo root
-        run: |
-          echo "=== GITHUB_WORKSPACE ==="
-          echo "$GITHUB_WORKSPACE"
-          ls -la "$GITHUB_WORKSPACE"
-          echo "=== FFExternal folder ==="
-          ls -la "$GITHUB_WORKSPACE/FFExternal" || echo "no FFExternal subfolder"
-          echo "=== xcodeproj ==="
-          find "$GITHUB_WORKSPACE" -name "*.xcodeproj" -maxdepth 3
-
       - name: Build (unsigned)
         run: |
           set -o pipefail
           PROJ=$(find "$GITHUB_WORKSPACE" -name "FFExternal.xcodeproj" -maxdepth 3 | head -1)
           PROJ_DIR=$(dirname "$PROJ")
-          echo "Project: $PROJ"
-          echo "Working dir: $PROJ_DIR"
           cd "$PROJ_DIR"
+
           xcodebuild archive \
             -project FFExternal.xcodeproj \
             -scheme FFExternal \
             -configuration Release \
             -archivePath "$RUNNER_TEMP/FFExternal.xcarchive" \
-            -destination "platform=iOS,name=Any iOS Device" \
+            -destination "generic/platform=iOS" \
             CODE_SIGNING_ALLOWED=NO \
             CODE_SIGN_IDENTITY="" \
             CODE_SIGN_ENTITLEMENTS="" \
             DEVELOPMENT_TEAM="" \
             PROVISIONING_PROFILE_SPECIFIER="" \
             2>&1 | tee /tmp/xcodebuild.log
-          echo "Build exit: ${PIPESTATUS[0]}"
+          echo "Exit: ${PIPESTATUS[0]}"
 
-      - name: Show build log on failure
+      - name: Show log on failure
         if: failure()
         run: tail -300 /tmp/xcodebuild.log
 
       - name: Package IPA
         run: |
-          ARCHIVE="$RUNNER_TEMP/FFExternal.xcarchive"
-          echo "Archive contents:"
-          find "$ARCHIVE" -maxdepth 4 | head -40
-
-          APP_PATH=$(find "$ARCHIVE" -name "*.app" -maxdepth 5 | head -1)
-          echo "Found .app: $APP_PATH"
-
-          if [ -z "$APP_PATH" ]; then
-            echo "ERROR: .app not found"
-            exit 1
-          fi
-
-          IPA_DIR="$RUNNER_TEMP/Payload"
-          mkdir -p "$IPA_DIR"
-          cp -R "$APP_PATH" "$IPA_DIR/"
+          APP_PATH=$(find "$RUNNER_TEMP/FFExternal.xcarchive" -name "*.app" -maxdepth 5 | head -1)
+          echo "App: $APP_PATH"
+          mkdir -p "$RUNNER_TEMP/Payload"
+          cp -R "$APP_PATH" "$RUNNER_TEMP/Payload/"
           cd "$RUNNER_TEMP"
           zip -r FFExternal.ipa Payload/
-          echo "IPA: $(du -sh FFExternal.ipa)"
+          echo "Done: $(du -sh FFExternal.ipa)"
 
       - name: Upload IPA
         uses: actions/upload-artifact@v4
