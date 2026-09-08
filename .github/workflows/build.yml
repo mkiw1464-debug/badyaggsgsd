@@ -1,216 +1,113 @@
-name: Build iOS
+name: Build IPA
 
 on:
+  workflow_dispatch:
   push:
     branches:
       - main
-  workflow_dispatch:
 
 jobs:
   build:
     runs-on: macos-14
 
     steps:
-      - name: Checkout repository
+      - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Show available Xcode
-        shell: bash
+      - name: Show environment
         run: |
-          set -euo pipefail
-
-          echo "macOS:"
-          sw_vers
-
-          echo ""
-          echo "Xcode installations:"
-          ls -d /Applications/Xcode*.app 2>/dev/null || true
-
-          echo ""
-          echo "Current developer directory:"
+          set -eux
           xcode-select -p
-
-          echo ""
-          echo "Xcode version:"
           xcodebuild -version
+          git rev-parse HEAD
+          git status --short
 
       - name: Check project file
-        shell: bash
         run: |
-          set -euo pipefail
+          set -eux
 
-          PBX="FFExternal.xcodeproj/project.pbxproj"
+          PROJECT="FFExternal.xcodeproj/project.pbxproj"
 
-          if [ ! -f "$PBX" ]; then
-            echo "ERROR: $PBX does not exist."
-            exit 1
-          fi
+          test -f "$PROJECT"
 
-          echo "Found:"
-          ls -lh "$PBX"
+          echo "===== project.pbxproj first lines ====="
+          sed -n '1,20p' "$PROJECT"
 
-      - name: Repair duplicated pbxproj
-        shell: bash
+          echo "===== project.pbxproj last lines ====="
+          tail -n 20 "$PROJECT"
+
+          echo "===== UTF8 header count ====="
+          grep -cF '// !$*UTF8*$!' "$PROJECT" || true
+
+          echo "===== plutil validation ====="
+          plutil -lint "$PROJECT"
+
+      - name: List Xcode project
         run: |
-          set -euo pipefail
-
-          PBX="FFExternal.xcodeproj/project.pbxproj"
-
-          python3 - "$PBX" <<'PY'
-          import sys
-
-          path = sys.argv[1]
-          marker = "// !$*UTF8*$!"
-
-          with open(path, "r", encoding="utf-8") as f:
-              data = f.read()
-
-          positions = []
-          start = 0
-
-          while True:
-              pos = data.find(marker, start)
-
-              if pos == -1:
-                  break
-
-              positions.append(pos)
-              start = pos + len(marker)
-
-          print(f"Found {len(positions)} project header(s).")
-
-          if len(positions) == 0:
-              raise SystemExit(
-                  "ERROR: No Xcode project header found."
-              )
-
-          if len(positions) > 1:
-              print("Duplicate project definitions detected.")
-              print("Keeping the last project definition.")
-
-              data = data[positions[-1]:]
-
-              with open(path, "w", encoding="utf-8") as f:
-                  f.write(data)
-
-              print("project.pbxproj repaired.")
-          else:
-              print("project.pbxproj already contains one project.")
-
-          PY
-
-      - name: Validate pbxproj
-        shell: bash
-        run: |
-          set -euo pipefail
-
-          PBX="FFExternal.xcodeproj/project.pbxproj"
-
-          echo "Header count:"
-          grep -cF '// !$*UTF8*$!' "$PBX" || true
-
-          echo ""
-          echo "Checking balanced braces..."
-
-          python3 - "$PBX" <<'PY'
-          import sys
-
-          path = sys.argv[1]
-
-          with open(path, "r", encoding="utf-8") as f:
-              data = f.read()
-
-          depth = 0
-          in_string = False
-          escaped = False
-
-          for char in data:
-              if escaped:
-                  escaped = False
-                  continue
-
-              if char == "\\":
-                  escaped = True
-                  continue
-
-              if char == '"':
-                  in_string = not in_string
-                  continue
-
-              if not in_string:
-                  if char == "{":
-                      depth += 1
-                  elif char == "}":
-                      depth -= 1
-
-                      if depth < 0:
-                          raise SystemExit(
-                              "ERROR: Closing brace without matching opening brace."
-                          )
-
-          if in_string:
-              raise SystemExit(
-                  "ERROR: Unterminated quoted string."
-              )
-
-          if depth != 0:
-              raise SystemExit(
-                  f"ERROR: Unbalanced braces. Final depth: {depth}"
-              )
-
-          print("Basic structure check passed.")
-          PY
-
-      - name: Read Xcode project
-        shell: bash
-        run: |
-          set -o pipefail
-
+          set -eux
           xcodebuild \
-            -list \
             -project FFExternal.xcodeproj \
-            2>&1 | tee "$RUNNER_TEMP/xcode-list.log"
+            -list
 
-      - name: Check FFExternal scheme
-        shell: bash
+      - name: Clean
         run: |
-          set -euo pipefail
-
-          if ! xcodebuild \
-              -list \
-              -project FFExternal.xcodeproj \
-              | grep -q "FFExternal"; then
-
-            echo "ERROR: FFExternal scheme/target was not found."
-            exit 1
-          fi
-
-          echo "FFExternal found."
-
-      - name: Archive
-        shell: bash
-        run: |
-          set -o pipefail
-
-          ARCHIVE_PATH="$RUNNER_TEMP/FFExternal.xcarchive"
-
-          rm -rf "$ARCHIVE_PATH"
-
-          xcodebuild archive \
+          set -eux
+          xcodebuild \
             -project FFExternal.xcodeproj \
             -scheme FFExternal \
             -configuration Release \
-            -archivePath "$ARCHIVE_PATH" \
-            -destination generic/platform=iOS \
-            CODE_SIGNING_ALLOWED=NO \
-            CODE_SIGN_IDENTITY="" \
-            DEVELOPMENT_TEAM="" \
-            PROVISIONING_PROFILE_SPECIFIER="" \
-            2>&1 | tee "$RUNNER_TEMP/xcodebuild.log"
+            clean \
+            CODE_SIGNING_ALLOWED=NO
 
-      - name: Upload archive
-        if: success()
+      - name: Archive
+        run: |
+          set -eux
+
+          rm -rf build
+          mkdir -p build
+
+          xcodebuild \
+            -project FFExternal.xcodeproj \
+            -scheme FFExternal \
+            -configuration Release \
+            -sdk iphoneos \
+            -archivePath "$PWD/build/FFExternal.xcarchive" \
+            archive \
+            CODE_SIGNING_ALLOWED=NO \
+            CODE_SIGNING_REQUIRED=NO \
+            CODE_SIGN_IDENTITY=""
+
+      - name: Create unsigned IPA
+        run: |
+          set -eux
+
+          APP_PATH="build/FFExternal.xcarchive/Products/Applications/FFExternal.app"
+
+          test -d "$APP_PATH"
+
+          rm -rf build/Payload
+          mkdir -p build/Payload
+
+          cp -R "$APP_PATH" build/Payload/FFExternal.app
+
+          cd build
+          zip -qry FFExternal.ipa Payload
+
+          test -f FFExternal.ipa
+
+          echo "===== IPA ====="
+          ls -lh FFExternal.ipa
+
+      - name: Upload IPA
         uses: actions/upload-artifact@v4
         with:
-          name: FFExternal-xcarchive
-          path: ${{ runner.temp }}/FFExternal.xcarchive
+          name: FFExternal-IPA
+          path: build/FFExternal.ipa
+          if-no-files-found: error
+
+      - name: Upload archive
+        uses: actions/upload-artifact@v4
+        with:
+          name: FFExternal-XCArchive
+          path: build/FFExternal.xcarchive
+          if-no-files-found: error
