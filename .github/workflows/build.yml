@@ -1,62 +1,123 @@
-name: Build FF External IPA
+name: Build iOS
 
 on:
   push:
-    branches: [main, master]
-  pull_request:
-    branches: [main, master]
+    branches:
+      - main
   workflow_dispatch:
 
 jobs:
   build:
-    runs-on: macos-15
-    timeout-minutes: 60
+    runs-on: macos-14
 
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Select Xcode 16
-        run: sudo xcode-select -s /Applications/Xcode_16.app/Contents/Developer
+      - name: Select Xcode
+        run: |
+          sudo xcode-select -s /Applications/Xcode_16.app/Contents/Developer
+          xcodebuild -version
 
-      - name: Build (unsigned)
+      - name: Repair Xcode project
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          PBX="FFExternal.xcodeproj/project.pbxproj"
+
+          if [ ! -f "$PBX" ]; then
+            echo "ERROR: $PBX not found"
+            exit 1
+          fi
+
+          echo "Checking project file..."
+
+          python3 - "$PBX" <<'PY'
+          import sys
+
+          path = sys.argv[1]
+          marker = "// !$*UTF8*$!"
+
+          with open(path, "r", encoding="utf-8") as f:
+              data = f.read()
+
+          positions = []
+          offset = 0
+
+          while True:
+              pos = data.find(marker, offset)
+
+              if pos == -1:
+                  break
+
+              positions.append(pos)
+              offset = pos + len(marker)
+
+          print(f"Found {len(positions)} Xcode project header(s)")
+
+          if not positions:
+              raise SystemExit("ERROR: No Xcode project header found")
+
+          if len(positions) > 1:
+              print("Duplicate project detected.")
+              print("Keeping the last project definition.")
+
+              data = data[positions[-1]:]
+
+              with open(path, "w", encoding="utf-8") as f:
+                  f.write(data)
+
+              print("project.pbxproj repaired.")
+          else:
+              print("No duplicate project definition found.")
+
+          PY
+
+      - name: Validate project
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          echo "Checking project structure..."
+
+          HEADER_COUNT=$(grep -cF '// !$*UTF8*$!' FFExternal.xcodeproj/project.pbxproj || true)
+
+          echo "Project headers: $HEADER_COUNT"
+
+          if [ "$HEADER_COUNT" -ne 1 ]; then
+            echo "ERROR: project.pbxproj still has an invalid number of headers."
+            exit 1
+          fi
+
+          echo "Running xcodebuild -list..."
+
+          xcodebuild \
+            -list \
+            -project FFExternal.xcodeproj
+
+      - name: Archive
+        shell: bash
         run: |
           set -o pipefail
-          PROJ=$(find "$GITHUB_WORKSPACE" -name "FFExternal.xcodeproj" -maxdepth 3 | head -1)
-          PROJ_DIR=$(dirname "$PROJ")
-          cd "$PROJ_DIR"
+
+          mkdir -p "$RUNNER_TEMP/FFExternal"
 
           xcodebuild archive \
             -project FFExternal.xcodeproj \
             -scheme FFExternal \
             -configuration Release \
-            -archivePath "$RUNNER_TEMP/FFExternal.xcarchive" \
-            -destination "generic/platform=iOS" \
+            -archivePath "$RUNNER_TEMP/FFExternal/FFExternal.xcarchive" \
+            -destination generic/platform=iOS \
             CODE_SIGNING_ALLOWED=NO \
             CODE_SIGN_IDENTITY="" \
-            CODE_SIGN_ENTITLEMENTS="" \
             DEVELOPMENT_TEAM="" \
             PROVISIONING_PROFILE_SPECIFIER="" \
-            2>&1 | tee /tmp/xcodebuild.log
-          echo "Exit: ${PIPESTATUS[0]}"
+            2>&1 | tee "$RUNNER_TEMP/xcodebuild.log"
 
-      - name: Show log on failure
-        if: failure()
-        run: tail -300 /tmp/xcodebuild.log
-
-      - name: Package IPA
-        run: |
-          APP_PATH=$(find "$RUNNER_TEMP/FFExternal.xcarchive" -name "*.app" -maxdepth 5 | head -1)
-          echo "App: $APP_PATH"
-          mkdir -p "$RUNNER_TEMP/Payload"
-          cp -R "$APP_PATH" "$RUNNER_TEMP/Payload/"
-          cd "$RUNNER_TEMP"
-          zip -r FFExternal.ipa Payload/
-          echo "Done: $(du -sh FFExternal.ipa)"
-
-      - name: Upload IPA
+      - name: Upload archive
+        if: success()
         uses: actions/upload-artifact@v4
         with:
-          name: FFExternal-${{ github.run_number }}
-          path: ${{ env.RUNNER_TEMP }}/FFExternal.ipa
-          retention-days: 30
+          name: FFExternal-xcarchive
+          path: ${{ runner.temp }}/FFExternal/FFExternal.xcarchive
